@@ -202,7 +202,10 @@ function gen_outbound(flag, node, tag, proxy_table)
 			v2ray_transport = {
 				type = "http",
 				host = node.tcp_guise_http_host,
-				path = (node.tcp_guise_http_path and node.tcp_guise_http_path[1]) or "/",
+				path = node.tcp_guise_http_path and (function()
+						local first = node.tcp_guise_http_path[1]
+						return (first == "" or not first) and "/" or first
+					end)() or "/",
 				idle_timeout = (node.http_h2_health_check == "1") and node.http_h2_read_idle_timeout or nil,
 				ping_timeout = (node.http_h2_health_check == "1") and node.http_h2_health_check_timeout or nil,
 			}
@@ -909,7 +912,6 @@ function gen_config(var)
 	local direct_dns_port = var["-direct_dns_port"]
 	local direct_dns_udp_server = var["-direct_dns_udp_server"]
 	local direct_dns_tcp_server = var["-direct_dns_tcp_server"]
-	local direct_dns_dot_server = var["-direct_dns_dot_server"]
 	local direct_dns_query_strategy = var["-direct_dns_query_strategy"]
 	local remote_dns_server = var["-remote_dns_server"]
 	local remote_dns_port = var["-remote_dns_port"]
@@ -1555,6 +1557,9 @@ function gen_config(var)
 			end
 
 			if remote_server.address then
+				if api.is_local_ip(remote_server.address) then  --dns为本地ip，不走代理
+					remote_server.detour = "direct"
+				end
 				table.insert(dns.servers, remote_server)
 			end
 
@@ -1584,15 +1589,17 @@ function gen_config(var)
 			remote_server = {
 				tag = "remote",
 				domain_strategy = remote_strategy,
-				domain_resolver = "direct",
 				detour = default_outTag,
 			}
+
+			local tmp_address
 
 			if remote_dns_udp_server then
 				local server_port = tonumber(remote_dns_port) or 53
 				remote_server.type = "udp"
 				remote_server.server = remote_dns_udp_server
 				remote_server.server_port = server_port
+				tmp_address = remote_dns_udp_server
 			end
 
 			if remote_dns_tcp_server then
@@ -1600,6 +1607,7 @@ function gen_config(var)
 				remote_server.type = "tcp"
 				remote_server.server = remote_dns_server
 				remote_server.server_port = server_port
+				tmp_address = remote_dns_server
 			end
 
 			if remote_dns_doh_url and remote_dns_doh_host then
@@ -1607,9 +1615,17 @@ function gen_config(var)
 				remote_server.type = "https"
 				remote_server.server = remote_dns_doh_host
 				remote_server.server_port = server_port
+				tmp_address = remote_dns_doh_host
+			end
+
+			if tmp_address and not tmp_address:match("^%d+%.%d+%.%d+%.%d+$") and not tmp_address:match("^[%[%]%x:]+$") then  --dns为域名时
+				remote_server.domain_resolver = "direct"
 			end
 
 			if remote_server.server then
+				if api.is_local_ip(remote_server.server) then  --dns为本地ip，不走代理
+					remote_server.detour = "direct"
+				end
 				table.insert(dns.servers, remote_server)
 			end
 
@@ -1633,7 +1649,7 @@ function gen_config(var)
 		end
 
 		local direct_strategy = "prefer_ipv6"
-		if direct_dns_udp_server or direct_dns_tcp_server or direct_dns_dot_server then
+		if direct_dns_udp_server or direct_dns_tcp_server then
 			if direct_dns_query_strategy == "UseIPv4" then
 				direct_strategy = "ipv4_only"
 			elseif direct_dns_query_strategy == "UseIPv6" then
@@ -1661,13 +1677,6 @@ function gen_config(var)
 				elseif direct_dns_tcp_server then
 					port = tonumber(direct_dns_port) or 53
 					direct_dns_server = "tcp://" .. direct_dns_tcp_server .. ":" .. port
-				elseif direct_dns_dot_server then
-					port = tonumber(direct_dns_port) or 853
-					if direct_dns_dot_server:find(":") == nil then
-						direct_dns_server = "tls://" .. direct_dns_dot_server .. ":" .. port
-					else
-						direct_dns_server = "tls://[" .. direct_dns_dot_server .. "]:" .. port
-					end
 				end
 		
 				table.insert(dns.servers, {
@@ -1687,10 +1696,6 @@ function gen_config(var)
 					port = tonumber(direct_dns_port) or 53
 					direct_dns_server = direct_dns_tcp_server
 					type = "tcp"
-				elseif direct_dns_dot_server then
-					port = tonumber(direct_dns_port) or 853
-					direct_dns_server = direct_dns_dot_server
-					type = "tls"
 				end
 		
 				table.insert(dns.servers, {
@@ -1759,7 +1764,9 @@ function gen_config(var)
 						if value.outboundTag ~= COMMON.default_outbound_tag and (remote_server.address or remote_server.server) then
 							local remote_shunt_server = api.clone(remote_server)
 							remote_shunt_server.tag = value.outboundTag
-							remote_shunt_server.detour = value.outboundTag
+							local is_local = (remote_server.address and api.is_local_ip(remote_server.address)) or
+									 (remote_server.server and api.is_local_ip(remote_server.server))  --dns为本地ip，不走代理
+							remote_shunt_server.detour = is_local and "direct" or value.outboundTag
 							table.insert(dns.servers, remote_shunt_server)
 							dns_rule.server = remote_shunt_server.tag
 						end
@@ -1847,7 +1854,8 @@ function gen_config(var)
 					servers = {
 						{
 							type = "local",
-							tag = "direct"
+							tag = "direct",
+							detour = "direct"
 						}
 					},
 				}

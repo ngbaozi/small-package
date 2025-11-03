@@ -69,13 +69,13 @@ var Timefield = ui.Textfield.extend({
 		let string = '0';
 		if(/^\d+$/.test(value)) {
 			value = Number(value);
-			if(value >= 86400 && (value % 86400) === 0) {
+			if(value >= 86400 && (value % 86400) == 0) {
 				string = String(value / 86400) + 'd';
 			}
-			else if(value >= 3600 && (value % 3600) === 0) {
+			else if(value >= 3600 && (value % 3600) == 0) {
 				string = String(value / 3600) + 'h';
 			}
-			else if(value >= 60 && (value % 60) === 0) {
+			else if(value >= 60 && (value % 60) == 0) {
 				string = String(value / 60) + 'm';
 			}
 			else {
@@ -107,16 +107,16 @@ var Timefield = ui.Textfield.extend({
 		    value    = 0,
 		    res      = rawValue.match(/^(\d+)([dhms]?)$/);
 		if(res) {
-			if(res[2] === 'd') {
+			if(res[2] == 'd') {
 				value = Number(res[1]) * 86400;
 			}
-			else if(res[2] === 'h') {
+			else if(res[2] == 'h') {
 				value = Number(res[1]) * 3600;
 			}
-			else if(res[2] === 'm') {
+			else if(res[2] == 'm') {
 				value = Number(res[1]) * 60;
 			}
-			else if(!res[2] || res[2] === 's') {
+			else if(!res[2] || res[2] == 's') {
 				value = Number(res[1]);
 			}
 			else {
@@ -173,9 +173,29 @@ return view.extend({
 	initButton             : null,
 	currentAppMode         : '0',
 	defaultHosts           : [ '8.8.8.8', '1.1.1.1' ],
+	defaultURLs            : [ 'https://www.google.com' ],
 	ledsPath               : '/sys/class/leds',
 	ledsPerInstance        : 3,
 	leds                   : [],
+	publicIPProviders      : {
+		dns : [
+			{ name: 'opendns1', title: 'opendns1 (DNS)' },
+			{ name: 'opendns2', title: 'opendns2 (DNS)' },
+			{ name: 'opendns3', title: 'opendns3 (DNS)' },
+			{ name: 'opendns4', title: 'opendns4 (DNS)' },
+			{ name: 'google',   title: 'google (DNS)' },
+			{ name: 'akamai',   title: 'akamai (DNS)' },
+		],
+		http: [
+			{ name: 'akamai_http', title: 'akamai (HTTP)' },
+			{ name: 'amazonaws',   title: 'amazonaws (HTTP)' },
+			{ name: 'wgetip',      title: 'wgetip.com (HTTP)' },
+			{ name: 'ifconfig',    title: 'ifconfig.me (HTTP)' },
+			{ name: 'ipecho',      title: 'ipecho.net (HTTP)' },
+			{ name: 'canhazip',    title: 'canhazip.com (HTTP)' },
+			{ name: 'icanhazip',   title: 'icanhazip.com (HTTP)' },
+		],
+	},
 	tgUpdatesURLPattern    : 'https://api.telegram.org/bot%s/getUpdates',
 	mm                     : false,
 	mmInit                 : false,
@@ -275,14 +295,14 @@ return view.extend({
 	setInternetStatus() {
 		this.inetStatusArea.innerHTML = '';
 
-		if(!this.inetStatus || !this.inetStatus.instances || this.inetStatus.instances.length === 0) {
+		if(!this.inetStatus || !this.inetStatus.instances || this.inetStatus.instances.length == 0) {
 			let label = E('span', { 'class': 'id-label-status id-undefined' }, _('Undefined'));
-			if((this.currentAppMode === '1' && this.appStatus !== 'stoped') || this.currentAppMode === '2') {
+			if((this.currentAppMode == '1' && this.appStatus != 'stoped') || this.currentAppMode == '2') {
 				label.classList.add('spinning');
 			};
 			this.inetStatusArea.append(label);
 		} else {
-			this.inetStatus.instances.sort((a, b) => a.num > b.num);
+			this.inetStatus.instances.sort((a, b) => a.num - b.num);
 
 			for(let i of this.inetStatus.instances) {
 				let status    = _('Disconnected');
@@ -297,7 +317,7 @@ return view.extend({
 				};
 
 				let publicIp = (i.mod_public_ip !== undefined) ?
-					' | %s: %s'.format(_('Public IP'), (i.mod_public_ip === '') ? _('Undefined') : _(i.mod_public_ip))
+					' | %s: %s'.format(_('Public IP'), (i.mod_public_ip == '') ? _('Undefined') : _(i.mod_public_ip))
 				: '';
 
 				this.inetStatusArea.append(
@@ -310,7 +330,7 @@ return view.extend({
 					this.modRegularScriptNextRun[i.instance] = i.mod_regular_script;
 					let nextRunLabel = document.getElementById('id_next_run_' + i.instance);
 					if(nextRunLabel) {
-						if(this.appStatus === 'running') {
+						if(this.appStatus == 'running') {
 							nextRunLabel.innerHTML = this.modRegularScriptNextRun[i.instance];
 						} else {
 							nextRunLabel.innerHTML = _('Not scheduled');
@@ -320,7 +340,7 @@ return view.extend({
 			};
 		};
 
-		if(this.appStatus === 'running') {
+		if(this.appStatus == 'running') {
 			this.serviceStatusLabel.textContent = _('Running');
 		} else {
 			this.serviceStatusLabel.textContent = _('Stopped');
@@ -413,6 +433,11 @@ return view.extend({
 			alert(e.message);
 			throw e;
 		});
+	},
+
+	validateUrl(section, value) {
+		return (/^$|^https?:\/\/[\w.-]+(:[0-9]{2,5})?[\w\/~.&?+=-]*$/.test(value)) ?
+			true : _('Expecting:') + ` ${_('valid URL')}\n`;
 	},
 
 	CBITimeInput: form.Value.extend({
@@ -633,7 +658,7 @@ return view.extend({
 		if(!data) {
 			return;
 		};
-		this.appStatus  = (data[0].code === 0) ? data[0].stdout.trim() : null;
+		this.appStatus  = (data[0].code == 0) ? data[0].stdout.trim() : null;
 		this.initStatus = data[1];
 		this.leds       = data[2];
 		if(data[3]) {
@@ -675,7 +700,7 @@ return view.extend({
 
 		/* Service widget */
 
-		if(this.currentAppMode === '1') {
+		if(this.currentAppMode == '1') {
 			o = s.option(this.CBIBlockServiceStatus, this);
 
 			// restart button
@@ -709,7 +734,7 @@ return view.extend({
 
 		/* Instances configuration */
 
-		if(this.currentAppMode !== '2') {
+		if(this.currentAppMode != '2') {
 
 			// logging_level
 			o = s.option(form.ListValue, 'logging_level',
@@ -762,31 +787,50 @@ return view.extend({
 			list.value(2000, '2 '   + _('sec'));
 		}
 
-		// enabled
-		o = s.taboption('main', form.Flag, 'enabled',
-			_('Enabled'),
-		);
-		o.rmempty   = false;
-		o.default   = '1';
-		o.editable  = true;
-		o.modalonly = false;
+		// description
+		o = s.taboption('main', form.Value, 'description',
+			_("Description"));
+		o.datatype  = 'maxlength(30)';
+		o.modalonly = null;
 
 		// hosts
 		o = s.taboption('main', form.DynamicList,
 			'hosts', _('Hosts'),
-			_('Hosts to check Internet availability. Hosts are polled (in list order) until at least one of them responds.')
+			_('Hosts for checking Internet availability. Hosts are polled (in list order) until at least one responds.')
 		);
-		o.datatype = 'or(or(host,hostport),ipaddrport(1))';
-		o.default  = this.defaultHosts;
-		o.rmempty  = false;
+		o.datatype  = 'or(host,hostport,ipaddrport(1))';
+		o.default   = this.defaultHosts;
+		o.depends({ check_type: '0' });
+		o.depends({ check_type: '1' });
+		o.rmempty   = false;
+		o.modalonly = true;
+
+		if(this.curlExec) {
+
+			// urls
+			o = s.taboption('main', form.DynamicList,
+				'urls', _('URLs'),
+				_('URLs for checking Internet availability. URLs are polled (in list order) until at least one returns HTTP status code 200.')
+			);
+			o.validate  = this.validateUrl;
+			o.default   = this.defaultURLs;
+			o.rmempty   = false;
+			o.depends({ check_type: '2' });
+			o.modalonly = true;
+		};
 
 		// check_type
 		o = s.taboption('main', form.ListValue,
 			'check_type', _('Check type'),
-			_('Host availability check type.')
+			_('Host availability check type.') + '<br />' +
+			((this.curlExec) ? '' :
+				_('To support URL checking, you need to install curl.'))
 		);
-		o.value(0, _('TCP port connection'));
 		o.value(1, _('ICMP-echo request (ping)'));
+		o.value(0, _('TCP port connection'));
+		if(this.curlExec) {
+			o.value(2, _('URL test (HTTP)'));
+		};
 		o.default   = '0';
 		o.modalonly = true;
 
@@ -795,8 +839,8 @@ return view.extend({
 			'tcp_port', _('TCP port'),
 			_('Default port value for TCP connections.')
 		);
-		o.datatype = 'port';
-		o.default  = '53';
+		o.datatype  = 'port';
+		o.default   = '53';
 		o.depends({ check_type: '0' });
 		o.modalonly = true;
 
@@ -809,16 +853,51 @@ return view.extend({
 		o.value(248,  _('Big: 248 bytes'));
 		o.value(1492, _('Huge: 1492 bytes'));
 		o.value(9000, _('Jumbo: 9000 bytes'));
-		o.default = '56';
+		o.default   = '56';
 		o.depends({ check_type: '1' });
 		o.modalonly = true;
+
+		if(this.curlExec) {
+
+			// proxy_type
+			o = s.taboption('main', form.ListValue,
+				'proxy_type', _('Proxy')
+			);
+			o.value('', _('Disabled'));
+			o.value('http');
+			o.value('socks4');
+			o.value('socks4a');
+			o.value('socks5');
+			o.value('socks5h');
+			o.default   = '';
+			o.depends({ check_type: '2' });
+			o.modalonly = true;
+
+			// proxy_host
+			o = s.taboption('main', form.Value,
+				'proxy_host', _('Proxy host')
+			);
+			o.datatype  = 'host';
+			o.rmempty   = false;
+			o.depends({ proxy_type: /.+/ });
+			o.modalonly = true;
+
+			// proxy_port
+			o = s.taboption('main', form.Value,
+				'proxy_port', _('Proxy port')
+			);
+			o.datatype  = 'port';
+			o.rmempty   = false;
+			o.depends({ proxy_type: /.+/ });
+			o.modalonly = true;
+		};
 
 		// iface
 		o = s.taboption('main', widgets.DeviceSelect,
 			'iface', _('Device'),
 			_('Network device for Internet access. If not specified, the default device is used.')
 		);
-		o.noaliases  = true;
+		o.noaliases = true;
 
 		// interval_up
 		o = s.taboption('main', form.ListValue,
@@ -847,8 +926,6 @@ return view.extend({
 		o.value(1);
 		o.value(2);
 		o.value(3);
-		o.value(4);
-		o.value(5);
 		o.default = '2';
 
 		// connection_timeout
@@ -869,10 +946,19 @@ return view.extend({
 		o.value(10, '10 ' + _('sec'));
 		o.default = '2';
 
+		// enabled
+		o = s.taboption('main', form.Flag, 'enabled',
+			_('Enabled'),
+		);
+		o.rmempty   = false;
+		o.default   = '1';
+		o.editable  = true;
+		o.modalonly = false;
+
 
 		/* Modules */
 
-		if(this.currentAppMode !== '2') {
+		if(this.currentAppMode != '2') {
 			s.tab('led_control', _('LED control'));
 			s.tab('reboot_device', _('Reboot device'));
 			s.tab('restart_network', _('Restart network'));
@@ -883,7 +969,7 @@ return view.extend({
 
 		s.tab('public_ip', _('Public IP address'));
 
-		if(this.currentAppMode !== '2') {
+		if(this.currentAppMode != '2') {
 			if(this.email) {
 				s.tab('email', _('Email notification'));
 			};
@@ -896,7 +982,15 @@ return view.extend({
 
 		s.addModalOptions = (s, section_id, ev) => {
 
-			if(this.currentAppMode !== '2') {
+			if(section_id == 'config') {
+				s.map.children = [];
+				s.map.readonly = true;
+				s.map.children.push(new form.NamedSection(s.map, '_dummy', '_dummy',
+					_('Error!'), _('Invalid instance name...')));
+				return;
+			};
+
+			if(this.currentAppMode != '2') {
 
 				// LED control
 
@@ -908,7 +1002,7 @@ return view.extend({
 				o.modalonly = true;
 
 				if(this.leds.length > 0) {
-					this.leds.sort((a, b) => a.name > b.name);
+					this.leds.sort((a, b) => (a.name > b.name) ? 1 : (a.name < b.name) ? -1 : 0);
 
 					// enabled
 					o = s.taboption('led_control', form.Flag,
@@ -1139,6 +1233,7 @@ return view.extend({
 				);
 				o.modalonly = true;
 				o.multiple  = true;
+				o.modalonly = true;
 
 				// attempts
 				o = s.taboption('restart_network', form.ListValue,
@@ -1320,25 +1415,18 @@ return view.extend({
 				'mod_public_ip_provider', _('Provider'),
 				_('Service for determining the public IP address.') + '<br />' +
 				((this.curlExec) ? '' :
-					_('To support HTTP services you need to install curl.'))
+					_('To support HTTP services, you need to install curl.'))
 			);
 			o.modalonly = true;
-			o.value('opendns1', 'opendns1 (DNS)');
-			o.value('opendns2', 'opendns2 (DNS)');
-			o.value('opendns3', 'opendns3 (DNS)');
-			o.value('opendns4', 'opendns4 (DNS)');
-			o.value('google',   'google (DNS)');
-			o.value('akamai',   'akamai (DNS)');
-			if(this.curlExec) {
-				o.value('akamai_http', "akamai (HTTP)");
-				o.value('amazonaws',   "amazonaws (HTTP)");
-				o.value('wgetip',      "wgetip.com (HTTP)");
-				o.value('ifconfig',    "ifconfig.me (HTTP)");
-				o.value('ipecho',      "ipecho.net (HTTP)");
-				o.value('canhazip',    "canhazip.com (HTTP)");
-				o.value('icanhazip',   "icanhazip.com (HTTP)");
+			for(let i of this.publicIPProviders.dns) {
+				o.value(i.name, i.title);
 			};
-			o.default = 'opendns1';
+			if(this.curlExec) {
+				for(let i of this.publicIPProviders.http) {
+					o.value(i.name, i.title);
+				};
+			};
+			o.default = this.publicIPProviders.dns[0].name;
 
 			// ipv6
 			o = s.taboption('public_ip', form.ListValue,
@@ -1349,12 +1437,9 @@ return view.extend({
 			o.value('0', 'A (IPv4)');
 			o.value('1', 'AAAA (IPv6)');
 			o.default = '0';
-			o.depends({ 'mod_public_ip_provider': 'opendns1' });
-			o.depends({ 'mod_public_ip_provider': 'opendns2' });
-			o.depends({ 'mod_public_ip_provider': 'opendns3' });
-			o.depends({ 'mod_public_ip_provider': 'opendns4' });
-			o.depends({ 'mod_public_ip_provider': 'google' });
-			o.depends({ 'mod_public_ip_provider': 'akamai' });
+			for(let i of this.publicIPProviders.dns) {
+				o.depends({ mod_public_ip_provider: i.name });
+			};
 
 			// interval
 			o = s.taboption('public_ip', form.ListValue,
@@ -1404,7 +1489,7 @@ return view.extend({
 				o.value(i, i + ' ' + _('sec'));
 			};
 
-			if(this.currentAppMode !== '2') {
+			if(this.currentAppMode != '2') {
 
 				// enable_ip_script
 				o = s.taboption('public_ip', form.Flag,
@@ -1563,7 +1648,7 @@ return view.extend({
 						// enabled
 						o = s.taboption('telegram', form.Flag,
 							'mod_telegram_enabled',
-							_('Enable'));
+							_('Enabled'));
 						o.rmempty   = false;
 						o.modalonly = true;
 
@@ -1613,7 +1698,6 @@ return view.extend({
 						o.password  = true;
 						o.modalonly = true;
 
-						// tg_chat_id
 						o = s.taboption('telegram', this.CBITextfieldButtonInput,
 							'mod_telegram_chat_id', _('Chat ID'),
 							_('ID of the Telegram chat to which messages will be sent.')
@@ -1771,7 +1855,7 @@ return view.extend({
 				// down_script_attempt_interval
 				o = ss.taboption('user_scripts_down_script', this.CBITimeInput,
 					'mod_user_scripts_down_script_attempt_interval',
-					_('Attempt interval'),
+					 _('Attempt interval'),
 					_('Interval between down-script runs.')
 				);
 				o.default   = '60';
@@ -1840,9 +1924,9 @@ return view.extend({
 
 		};
 
-		if(this.currentAppMode !== '0') {
+		if(this.currentAppMode != '0') {
 			poll.add(
-				L.bind((this.currentAppMode === '1') ? this.servicePoll : this.uiPoll, this),
+				L.bind((this.currentAppMode == '1') ? this.servicePoll : this.uiPoll, this),
 				this.pollInterval
 			);
 		};

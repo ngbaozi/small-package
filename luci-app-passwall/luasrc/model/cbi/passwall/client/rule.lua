@@ -29,7 +29,6 @@ o = s:option(DynamicList, "chnroute_url", translate("China IPs(chnroute) Update 
 o:depends("geo2rule", false)
 o:value("https://fastly.jsdelivr.net/gh/gaoyifan/china-operator-ip@ip-lists/china.txt", translate("gaoyifan/china-operator-ip/china"))
 o:value("https://ispip.clang.cn/all_cn.txt", translate("Clang.CN"))
-o:value("https://ispip.clang.cn/all_cn_cidr.txt", translate("Clang.CN.CIDR"))
 o:value("https://fastly.jsdelivr.net/gh/soffchen/GeoIP2-CN@release/CN-ip-cidr.txt", translate("soffchen/GeoIP2-CN"))
 o:value("https://fastly.jsdelivr.net/gh/Hackl0us/GeoIP2-CN@release/CN-ip-cidr.txt", translate("Hackl0us/GeoIP2-CN"))
 o:value("https://fastly.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Clash/ChinaMax/ChinaMax_IP_No_IPv6.txt", translate("ios_rule_script/ChinaMax_IP_No_IPv6"))
@@ -129,6 +128,16 @@ for t = 1, 24 do o:value(t, t .. " " .. translate("hour")) end
 o.default = 2
 o:depends("week_update", "8")
 o.rmempty = true
+
+---- 更新选项，始终被js隐藏
+local flags = {
+	"gfwlist_update", "chnroute_update", "chnroute6_update",
+	"chnlist_update", "geoip_update", "geosite_update"
+}
+for _, f in ipairs(flags) do
+	o = s:option(Flag, f)
+	o.rmempty = false
+end
 
 s:append(Template(appname .. "/rule/rule_version"))
 

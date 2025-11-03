@@ -146,7 +146,10 @@ function gen_outbound(flag, node, tag, proxy_table)
 			v2ray_transport = {
 				type = "http",
 				host = node.tcp_guise_http_host,
-				path = (node.tcp_guise_http_path and node.tcp_guise_http_path[1]) or "/",
+				path = node.tcp_guise_http_path and (function()
+						local first = node.tcp_guise_http_path[1]
+						return (first == "" or not first) and "/" or first
+					end)() or "/",
 				idle_timeout = (node.http_h2_health_check == "1") and node.http_h2_read_idle_timeout or nil,
 				ping_timeout = (node.http_h2_health_check == "1") and node.http_h2_health_check_timeout or nil,
 			}
@@ -937,10 +940,10 @@ function gen_config(var)
 							type = _type,
 							tag = rule_set_tag,
 							format = format,
-							path = format == "source" and w or nil,
-							url = format == "binary" and w or nil,
-							--download_detour = format == "binary" and "",
-							--update_interval = format == "binary" and "",
+							path = _type == "local" and w or nil,
+							url = _type == "remote" and w or nil,
+							--download_detour = _type == "remote" and "",
+							--update_interval = _type == "remote" and "",
 						}
 						rule_set_table[rule_set_tag] = t
 						result = t

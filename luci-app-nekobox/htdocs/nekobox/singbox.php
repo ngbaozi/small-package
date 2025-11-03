@@ -149,20 +149,181 @@ EOL;
 }
 ?>
 
+<?php
+$dataFilePath = '/etc/neko/proxy_provider/subscription_data.txt';
+$lastUpdateTime = null;
+
+$validUrls = [];
+if (file_exists($dataFilePath)) {
+    $lines = file($dataFilePath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if ($line === '') continue;
+
+        $parts = explode('|', $line);
+        foreach ($parts as $part) {
+            $part = trim($part);
+            if ($part !== '' && preg_match('/^https?:\/\//i', $part)) {
+                $validUrls[] = $part;
+            }
+        }
+    }
+}
+
+$libDir = __DIR__ . '/lib';
+$cacheFile = $libDir . '/sub_info.json';
+if (empty($validUrls) && file_exists($cacheFile)) {
+    unlink($cacheFile);
+}
+
+function formatBytes($bytes, $precision = 2) {
+    if ($bytes === INF || $bytes === "∞") return "∞";
+    if ($bytes <= 0) return "0 B";
+    $units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    $pow = floor(log($bytes, 1024));
+    $pow = min($pow, count($units) - 1);
+    $bytes /= pow(1024, $pow);
+    return round($bytes, $precision) . ' ' . $units[$pow];
+}
+
+function getSubInfo($subUrl, $userAgent = "Clash") {
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $subUrl);
+    curl_setopt($ch, CURLOPT_NOBODY, true);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_HEADER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_USERAGENT, $userAgent);
+
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($http_code !== 200 || !$response) {
+        return ["http_code"=>$http_code,"sub_info"=>"Request Failed","get_time"=>time()];
+    }
+
+    if (!preg_match("/subscription-userinfo: (.*)/i", $response, $matches)) {
+        return ["http_code"=>$http_code,"sub_info"=>"No Sub Info Found","get_time"=>time()];
+    }
+
+    $info = $matches[1];
+    preg_match("/upload=(\d+)/",$info,$m);   $upload   = isset($m[1]) ? (int)$m[1] : 0;
+    preg_match("/download=(\d+)/",$info,$m); $download = isset($m[1]) ? (int)$m[1] : 0;
+    preg_match("/total=(\d+)/",$info,$m);    $total    = isset($m[1]) ? (int)$m[1] : 0;
+    preg_match("/expire=(\d+)/",$info,$m);   $expire   = isset($m[1]) ? (int)$m[1] : 0;
+
+    $used = $upload + $download;
+    $percent = ($total > 0) ? ($used / $total) * 100 : 100;
+
+    $expireDate = "null";
+    $day_left = "null";
+    if ($expire > 0) {
+        $expireDate = date("Y-m-d H:i:s",$expire);
+        $day_left   = $expire > time() ? ceil(($expire-time())/(3600*24)) : 0;
+    } elseif ($expire === 0) {
+        $expireDate = "Long-term";
+        $day_left   = "∞";
+    }
+
+    return [
+        "http_code"=>$http_code,
+        "sub_info"=>"Successful",
+        "upload"=>$upload,
+        "download"=>$download,
+        "used"=>$used,
+        "total"=>$total > 0 ? $total : "∞",
+        "percent"=>round($percent,1),
+        "day_left"=>$day_left,
+        "expire"=>$expireDate,
+        "get_time"=>time(),
+        "url"=>$subUrl
+    ];
+}
+
+function saveAllSubInfos($results) {
+    $libDir = __DIR__ . '/lib';
+    if (!is_dir($libDir)) mkdir($libDir, 0755, true);
+    $filePath = $libDir . '/sub_info.json';
+    file_put_contents($filePath, json_encode($results, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+    return $filePath;
+}
+
+function loadAllSubInfosFromFile(&$lastUpdateTime = null) {
+    $libDir = __DIR__ . '/lib';
+    $filePath = $libDir . '/sub_info.json';
+    $results = [];
+    if (file_exists($filePath)) {
+        $results = json_decode(file_get_contents($filePath), true);
+        if ($results) {
+            $times = array_column($results, 'get_time');
+            if (!empty($times)) $lastUpdateTime = max($times);
+        }
+    }
+    return $results;
+}
+
+function clearSubFile() {
+    $libDir = __DIR__ . '/lib';
+    $filePath = $libDir . '/sub_info.json';
+    if (file_exists($filePath)) unlink($filePath);
+}
+
+function fetchAllSubInfos($urls) {
+    $results = [];
+    foreach ($urls as $url) {
+        if (empty(trim($url))) continue;
+        $userAgents = ["Clash","clash","ClashVerge","Stash","NekoBox","Quantumult%20X","Surge","Shadowrocket","V2rayU","Sub-Store","Mozilla/5.0"];
+        $subInfo = null;
+        foreach ($userAgents as $ua) {
+            $subInfo = getSubInfo($url,$ua);
+            if ($subInfo['sub_info']==="Successful") break;
+        }
+        $results[$url] = $subInfo;
+    }
+
+    saveAllSubInfos($results);
+    return $results;
+}
+
+if ($_SERVER['REQUEST_METHOD']=='POST' && isset($_POST['clearSubscriptions'])) {
+    clearSubFile();
+    header("Location: ".$_SERVER['PHP_SELF']);
+    exit;
+}
+
+
+$lastUpdateTime = null;
+if ($_SERVER['REQUEST_METHOD']=='POST' && isset($_POST['generateConfig'])) {
+    $subscribeUrls = preg_split('/[\r\n,|]+/', trim($_POST['subscribeUrl'] ?? ''));
+    $subscribeUrls = array_filter($subscribeUrls);
+
+    $customFileName = basename(trim($_POST['customFileName'] ?? ''));
+    if (empty($customFileName)) $customFileName = 'sing-box';
+    if (substr($customFileName,-5) !== '.json') $customFileName .= '.json';
+    $configFilePath = '/etc/neko/config/'.$customFileName;
+
+    $allSubInfos = fetchAllSubInfos($subscribeUrls);
+    $lastUpdateTime = time();
+} else {
+    $allSubInfos = loadAllSubInfosFromFile($lastUpdateTime);
+}
+?>
+
 <meta charset="utf-8">
 <title>singbox - Nekobox</title>
 <link rel="icon" href="./assets/img/nekobox.png">
 <script src="./assets/bootstrap/jquery.min.js"></script>
 <?php include './ping.php'; ?>
 
-<div class="container-sm container-bg mt-4">
+<div class="container-sm container-bg px-0 px-sm-4 mt-4">
 <nav class="navbar navbar-expand-lg sticky-top">
-    <div class="container-sm container">
+    <div class="container-sm container px-4 px-sm-3 px-md-4">
         <a class="navbar-brand d-flex align-items-center" href="#">
             <?= $iconHtml ?>
             <span style="color: var(--accent-color); letter-spacing: 1px;"><?= htmlspecialchars($title) ?></span>
         </a>
-        <button class="navbar-toggler" type="button" style="position: relative; z-index: 1;" data-bs-toggle="collapse" data-bs-target="#navbarContent">
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarContent">
             <i class="bi bi-list" style="color: var(--accent-color); font-size: 1.8rem;"></i>
         </button>
         <div class="collapse navbar-collapse" id="navbarContent">
@@ -181,6 +342,9 @@ EOL;
                 </li>
                 <li class="nav-item">
                     <a class="nav-link <?= $current == 'mihomo.php' ? 'active' : '' ?>" href="./mihomo.php"><i class="bi bi-building"></i> <span data-translate="template_iii">Template III</span></a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link <?= $current == 'netmon.php' ? 'active' : '' ?>" href="./netmon.php"><i class="bi bi-activity"></i> <span data-translate="traffic_monitor">Traffic Monitor</span></a>
                 </li>
                 <li class="nav-item">
                     <a class="nav-link <?= $current == 'filekit.php' ? 'active' : '' ?>" href="./filekit.php"><i class="bi bi-bank"></i> <span data-translate="pageTitle">File Assistant</span></a>
@@ -202,7 +366,7 @@ EOL;
 </nav>
 <div class="outer-container px-3">
     <div class="container-fluid">
-        <h2 class="title text-center" style="margin-top: 3rem; margin-bottom: 1rem;" data-translate="title">Sing-box Conversion Template One</h2>
+        <h2 class="title text-center mt-3 mb-3" data-translate="title">Sing-box Conversion Template One</h2>
         <div class="card">
             <div class="card-body">
                 <h4 class="card-title" data-translate="helpInfoHeading">Help Information</h4>
@@ -311,6 +475,51 @@ EOL;
         </form>
     </div>
 </div>
+<?php if (!empty($allSubInfos)): ?>
+<div class="container-sm py-1">
+    <div class="card">
+        <div class="card-body p-2">
+            <h5 class="py-1 ps-3">
+                <i class="bi bi-bar-chart"></i>
+                <span data-translate="subscriptionInfo"></span>
+            </h5>
+            <div class="rounded-3 p-2 border mx-3">
+                <?php foreach ($allSubInfos as $url => $subInfo): ?>
+                    <?php
+                        $total   = formatBytes($subInfo['total'] ?? 0);
+                        $used    = formatBytes($subInfo['used'] ?? 0);
+                        $percent = $subInfo['percent'] ?? 0;
+                        $dayLeft = $subInfo['day_left'] ?? '∞';
+                        $expire  = $subInfo['expire'] ?? 'expire';
+
+                        $remainingLabel = $translations['resetDaysLeftLabel'] ?? 'Remaining';
+                        $daysUnit       = $translations['daysUnit'] ?? 'days';
+                        $expireLabel    = $translations['expireDateLabel'] ?? 'Expires';
+                    ?>
+                    <div class="mb-1">
+                        <?= htmlspecialchars($url) ?>:
+                        <?php if ($subInfo['sub_info'] === "Successful"): ?>
+                            <span class="text-success">
+                                <?= "{$used} / {$total} ({$percent}%) • {$remainingLabel} {$dayLeft} {$daysUnit} • {$expireLabel}: {$expire}" ?>
+                            </span>
+                        <?php else: ?>
+                            <span class="text-danger">
+                                <?= htmlspecialchars($translations['subscriptionFetchFailed'] ?? 'Failed to obtain') ?>
+                            </span>
+                        <?php endif; ?>
+                    </div>
+                <?php endforeach; ?>
+
+                <?php if (!empty($lastUpdateTime)): ?>
+                    <div class="mt-2 text-end" style="font-size: 0.9em; color: var(--accent-color);">
+                        <?= ($translations['lastModified'] ?? 'Last Updated') ?>: <?= date('Y-m-d H:i:s', $lastUpdateTime) ?>
+                    </div>
+                <?php endif; ?>
+            </div>
+        </div>
+    </div>
+</div>
+<?php endif; ?>
 <?php
 function displayLogData($dataFilePath, $translations) {
     if (isset($_POST['clearData'])) {
@@ -354,6 +563,28 @@ $dataFilePath = '/etc/neko/proxy_provider/subscription_data.txt';
 $configFilePath = '/etc/neko/config/sing-box.json';
 $downloadedContent = '';
 $fixedFileName = 'subscription.txt';
+
+function url_decode_fields(&$node) {
+    $fields_to_decode = ['password', 'uuid', 'public_key', 'psk', 'id', 'alterId', 'short_id'];
+    
+    foreach ($fields_to_decode as $field) {
+        if (isset($node[$field]) && is_string($node[$field])) {
+            $node[$field] = urldecode($node[$field]);
+            
+            if (in_array($field, ['password', 'public_key', 'psk'])) {
+                $node[$field] = trim($node[$field]);
+            }
+        }
+    }
+    
+    if (isset($node['tls']['reality'])) {
+        url_decode_fields($node['tls']['reality']);
+    }
+    
+    if (isset($node['transport']['path']) && is_string($node['transport']['path'])) {
+        $node['transport']['path'] = urldecode($node['transport']['path']);
+    }
+}
 
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['generateConfig'])) {
     $subscribeUrl = trim($_POST['subscribeUrl'] ?? '');
@@ -433,9 +664,16 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['generateConfig'])) {
                 $removedTags = [];
 
                 if (isset($data['outbounds']) && is_array($data['outbounds'])) {
+                    foreach ($data['outbounds'] as &$node) {
+                        url_decode_fields($node);
+                    }
+                    unset($node);
+                }
+
+                if (isset($data['outbounds']) && is_array($data['outbounds'])) {
                     $data['outbounds'] = array_values(array_filter($data['outbounds'], function ($node) use (&$removedTags) {
                         if (
-                            (isset($node['method']) && stripos($node['method'], 'chacha20') !== false) ||
+                            (isset($node['method']) && strtolower($node['method']) === 'chacha20') ||
                             (isset($node['plugin']) && stripos($node['plugin'], 'v2ray-plugin') !== false)
                         ) {
                             if (isset($node['tag'])) {
@@ -480,7 +718,14 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['generateConfig'])) {
                     ];
                 }
 
-                $downloadedContent = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+                if (isset($data['outbounds']) && is_array($data['outbounds'])) {
+                    foreach ($data['outbounds'] as &$node) {
+                        url_decode_fields($node);
+                    }
+                    unset($node);
+                }
+
+                $downloadedContent = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
                 if ($downloadedContent === false) {
                     $logMessages[] = "Failed to encode JSON: " . json_last_error_msg();
                 } else {

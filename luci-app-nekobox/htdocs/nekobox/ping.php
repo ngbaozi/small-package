@@ -49,6 +49,20 @@ function deleteNekoTmpDirectory($dir) {
     return rmdir($dir);
 }
 ?>
+
+<?php
+$singbox_autostart = exec("uci -q get neko.cfg.singbox_autostart") ?: '0';
+
+if (isset($_POST['save_autostart'])) {
+    $autostart = isset($_POST['autostart']) ? '1' : '0';
+    shell_exec("uci set neko.cfg.singbox_autostart='$autostart'");
+    shell_exec("uci commit neko");
+    writeToLog("Autostart setting changed to: $autostart");
+    echo "<div class='log-message alert alert-danger'><span data-translate='settingSaved'></span></div>";
+    $singbox_autostart = $autostart;
+}
+?>
+
 <style>
 .modal {
         opacity: 0;
@@ -330,6 +344,52 @@ function deleteNekoTmpDirectory($dir) {
 .modal-body .alert.alert-warning .note-text {
         color: #ff0000 !important;
 }
+
+@media (max-width: 600px) {
+	.navbar-brand {
+		flex-shrink: 1;
+		min-width: 0;
+		white-space: nowrap;
+	}
+
+	#dynamicTitle {
+		white-space: nowrap;
+	}
+
+	.navbar-toggler i {
+		font-size: 1.2rem !important;
+	}
+
+	.navbar-toggler {
+		padding: 0.15rem 0.35rem;
+	}
+}
+
+@media (max-width: 768px) {
+	.row > .col {
+		flex: 0 0 50%;
+		max-width: 50%;
+	}
+
+	.row > .col:nth-child(n+3) {
+		flex: 0 0 33.3333%;
+		max-width: 33.3333%;
+	}
+
+	.row {
+		row-gap: 13px;
+	}
+
+	.d-flex.flex-wrap.mb-4 {
+		flex-wrap: nowrap !important;
+	}
+}
+
+.centered-img {
+        transition: transform 0.6s ease-in-out;
+        transform-style: preserve-3d;
+        transform: rotateY(0deg);
+}
 </style>
 
 <div id="theme-loader" style="display: none;">
@@ -340,6 +400,19 @@ function deleteNekoTmpDirectory($dir) {
 </div>
 
 <script>
+document.addEventListener('DOMContentLoaded', function() {
+    const img = document.querySelector('.centered-img');
+
+    const savedRotation = parseInt(localStorage.getItem('rotation')) || 0;
+    img.style.transform = `rotateY(${savedRotation}deg)`;
+
+    img.addEventListener('mouseenter', function() {
+        const newRotation = savedRotation + 180;
+        img.style.transform = `rotateY(${newRotation}deg)`;
+        localStorage.setItem('rotation', newRotation);
+    });
+});
+
 document.addEventListener("DOMContentLoaded", () => {
   const loader = document.getElementById("theme-loader");
   const MAX_WAIT_TIME = 15000;
@@ -409,6 +482,39 @@ document.addEventListener('click', e => {
   }
 });
 </script>
+
+<div class="modal fade" id="autostartModal" tabindex="-1" aria-labelledby="autostartModalLabel" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
+  <div class="modal-dialog modal-lg">
+    <form method="post" class="no-loader">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="autostartModalLabel" data-translate="singboxAutostartTitle">
+            Sing-box Auto Start
+          </h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" name="autostart" id="autostart"
+                   <?php echo ($singbox_autostart === '1') ? 'checked' : ''; ?>>
+            <label class="form-check-label" for="autostart">
+              <strong data-translate="enableAutostart">Enable Auto Start</strong>
+            </label>
+          </div>
+          <div class="mt-3">
+            <small class="text-muted" data-translate="autostartTip">
+              When checked, Sing-box will start automatically on router reboot (if Mihomo is not running)
+            </small>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" data-translate="cancel">Cancel</button>
+          <button type="submit" name="save_autostart" class="btn btn-primary" data-translate="saveButton">Save</button>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>
 
 <div class="modal fade" id="portModal" tabindex="-1" aria-labelledby="portModalLabel" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered modal-xl">
@@ -823,6 +929,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 data-tooltip="update_playlist">
             <i class="fa fa-sync-alt"></i>
         </button>
+        <button class="ctrl-btn" id="goFirstBtn">
+            <i class="fas fa-circle-left"></i>
+        </button>
         <button id="toggleFloatingLyricsBtn" class="ctrl-btn toggleFloatingLyricsBtn" data-tooltip="toggle_floating_lyrics">
             <i class="bi bi-display floatingIcon"></i>
         </button>
@@ -943,25 +1052,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <script>
 document.addEventListener('DOMContentLoaded', function () {
     const navbar = document.getElementById('navbarContent');
-    const isMobile = window.innerWidth < 992;
+    const toggler = document.querySelector('.navbar-toggler');
 
-    if (!isMobile) return;
+    if (!navbar || !toggler) return;
 
-    const bsCollapse = new bootstrap.Collapse(navbar, {
-        toggle: false
-    });
-
-    const savedState = localStorage.getItem('navbar-expanded');
-    if (savedState === 'true') {
-        bsCollapse.show();
+    function isMobile() {
+        return window.innerWidth < 992;
     }
 
-    navbar.addEventListener('show.bs.collapse', function () {
-        localStorage.setItem('navbar-expanded', 'true');
+    navbar.querySelectorAll('.nav-link').forEach(link => {
+        link.addEventListener('click', () => {
+            if (isMobile() && navbar.classList.contains('show')) {
+                toggler.click();
+            }
+        });
     });
 
-    navbar.addEventListener('hide.bs.collapse', function () {
-        localStorage.setItem('navbar-expanded', 'false');
+    document.addEventListener('click', (e) => {
+        const isInside = navbar.contains(e.target) || toggler.contains(e.target);
+        if (!isInside && navbar.classList.contains('show') && isMobile()) {
+            toggler.click();
+        }
     });
 });
 </script>
@@ -1085,10 +1196,22 @@ function updateLanguage(lang) {
         const dynamicContent = el.getAttribute('data-dynamic-content') || '';
 
         if (translations[translationKey]) {
+            let translatedText = translations[translationKey];
+        
+            const indexValue = el.getAttribute('data-index');
+            if (indexValue) {
+                translatedText = translatedText.replace('{index}', indexValue);
+            }
+        
+            const countValue = el.getAttribute('data-count');
+            if (countValue) {
+                translatedText = translatedText.replace('{count}', countValue);
+            }
+
             if (el.tagName === 'OPTGROUP') {
-                el.setAttribute('label', translations[translationKey]);
+                el.setAttribute('label', translatedText);
             } else {
-                el.innerText = translations[translationKey] + dynamicContent; 
+                el.innerText = translatedText + dynamicContent; 
             }
         }
     });
@@ -3532,6 +3655,16 @@ document.addEventListener('keydown', function (event) {
             break;
     }
 });
+
+document.getElementById('goFirstBtn')?.addEventListener('click', function() {
+    if (currentTrackIndex !== 0) {
+        currentTrackIndex = 0;
+        loadTrack(songs[0]);
+    }
+    const message = translations['back_to_first'] || 'Returned to the first song in the playlist';
+    showLogMessage(message);
+    speakMessage(message);
+});
 </script>
 
 <script>
@@ -5531,7 +5664,7 @@ body {
 	position: fixed;
 	top: 1%;
 	left: 4.5%;
-	background: var(--bg-body);
+	background: var(--bg-container);
 	padding: 15px 10px;
 	border-radius: 20px;
 	backdrop-filter: var(--glass-blur);
@@ -5543,13 +5676,14 @@ body {
 	writing-mode: vertical-rl;
 	text-orientation: mixed;
 	line-height: 2;
-	z-index: 2;
+	z-index: 1060;
 	flex-direction: column;
 	gap: 0.5em;
 	width: 200px;
 	resize: none;
 	overflow: auto;
 	user-select: none;
+        border: 1px solid var(--border-color, #999);
 }
 
 @keyframes float {
@@ -5604,10 +5738,10 @@ body {
 #floatingLyrics #floatingCurrentSong.vertical-title {
 	font-size: 1.8rem;
 	font-weight: 700;
-	color: var(--accent-color);
 	writing-mode: vertical-rl;
 	padding-right: 0.5em;
-	margin-right: 0.5em;
+	margin-left: auto;
+	margin-right: auto;
 	text-shadow: 0px 1px 2px rgba(0, 0, 0, 0.3), 
                  0px -1px 2px rgba(255, 255, 255, 0.4);
 }
@@ -5635,14 +5769,14 @@ body {
 
 .ctrl-btn {
 	background: var(--bg-body);
-	border: 1px solid rgba(255, 255, 255, 0.3);
+	border: 1px solid var(--border-color);
+	color: var(--text-primary) !important;
 	border-radius: 50%;
 	width: 36px;
 	height: 36px;
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	color: #fff;
 	transition: all 0.3s ease;
 	backdrop-filter: blur(5px);
 }
@@ -6078,7 +6212,7 @@ body {
 	display: none;
 	justify-content: center;
 	align-items: center;
-	z-index: 1000;
+	z-index: 1050;
 	backdrop-filter: blur(3px);
         transition: opacity 0.3s ease;
 }
@@ -6981,7 +7115,6 @@ label {
 
 .form-select {
 	background-color: var(--card-bg) !important;
-	background-image: none;
 }
 
 .form-control {
@@ -7744,7 +7877,7 @@ input[type=range]::-ms-thumb {
 }
 
 :root {
-	--container-width: 1600px;
+	--container-width: 1700px;
 	--modal-max-width: 1100px;
 }
 

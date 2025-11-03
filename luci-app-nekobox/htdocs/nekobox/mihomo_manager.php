@@ -167,44 +167,169 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['downloadFile'], $_GET['
     }
 }
 ?>
-
 <?php
-
+$JSON_FILE = '/etc/neko/proxy_provider/subscriptions.json';
 $subscriptionPath = '/etc/neko/proxy_provider/';
-$subscriptionFile = $subscriptionPath . 'subscriptions.json';
 $notificationMessage = "";
-$subscriptions = [];
 $updateCompleted = false;
-
-function storeUpdateLog($message) {
-    if (!isset($_SESSION['update_logs'])) {
-        $_SESSION['update_logs'] = [];
-    }
-    $_SESSION['update_logs'][] = $message;
-}
 
 if (!file_exists($subscriptionPath)) {
     mkdir($subscriptionPath, 0755, true);
 }
 
-if (!file_exists($subscriptionFile)) {
-    file_put_contents($subscriptionFile, json_encode([]));
-}
-
-$subscriptions = json_decode(file_get_contents($subscriptionFile), true);
-if (!$subscriptions) {
+if (!file_exists($JSON_FILE)) {
+    $emptySubs = [];
     for ($i = 0; $i < 6; $i++) {
-        $subscriptions[$i] = [
+        $emptySubs[] = [
             'url' => '',
-            'file_name' => "subscription_" . ($i + 1) . ".yaml",  
+            'file_name' => "subscription_" . ($i + 1) . ".yaml"
         ];
     }
+    file_put_contents($JSON_FILE, json_encode($emptySubs, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT));
 }
 
-if (isset($_POST['update'])) {
+function getSubscriptionsFromFile() {
+    global $JSON_FILE;
+    if (file_exists($JSON_FILE)) {
+        $content = file_get_contents($JSON_FILE);
+        $data = json_decode($content, true);
+        if (!is_array($data) || count($data) < 6) {
+            $data = $data ?? [];
+            for ($i = count($data); $i < 6; $i++) {
+                $data[$i] = [
+                    'url' => '',
+                    'file_name' => "subscription_" . ($i + 1) . ".yaml"
+                ];
+            }
+        }
+        return $data;
+    }
+    return [];
+}
+
+function formatBytes($bytes, $precision = 2) {
+    if ($bytes === INF || $bytes === "∞") return "∞";
+    if ($bytes <= 0) return "0 B";
+    $units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    $pow = floor(log($bytes, 1024));
+    $pow = min($pow, count($units) - 1);
+    $bytes /= pow(1024, $pow);
+    return round($bytes, $precision) . ' ' . $units[$pow];
+}
+
+function getSubInfo($subUrl, $userAgent = "Clash") {
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $subUrl);
+    curl_setopt($ch, CURLOPT_NOBODY, true);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_HEADER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_USERAGENT, $userAgent);
+
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($http_code !== 200 || !$response) {
+        return [
+            "http_code" => $http_code,
+            "sub_info" => "Request Failed",
+            "get_time" => time()
+        ];
+    }
+
+    if (!preg_match("/subscription-userinfo: (.*)/i", $response, $matches)) {
+        return [
+            "http_code" => $http_code,
+            "sub_info" => "No Sub Info Found",
+            "get_time" => time()
+        ];
+    }
+
+    $info = $matches[1];
+    preg_match("/upload=(\d+)/", $info, $m);   $upload   = isset($m[1]) ? (int)$m[1] : 0;
+    preg_match("/download=(\d+)/", $info, $m); $download = isset($m[1]) ? (int)$m[1] : 0;
+    preg_match("/total=(\d+)/", $info, $m);    $total    = isset($m[1]) ? (int)$m[1] : 0;
+    preg_match("/expire=(\d+)/", $info, $m);   $expire   = isset($m[1]) ? (int)$m[1] : 0;
+
+    $used = $upload + $download;
+    $surplus = ($total > 0) ? $total - $used : INF;
+    $percent = ($total > 0) ? (($total - $used) / $total) * 100 : 100;
+
+    $expireDate = "null";
+    $day_left = "null";
+    if ($expire > 0) {
+        $expireDate = date("Y-m-d H:i:s", $expire);
+        $day_left = $expire > time() ? ceil(($expire - time()) / (3600*24)) : 0;
+    } elseif ($expire === 0) {
+        $expireDate = "Long-term";
+        $day_left = "∞";
+    }
+
+    return [
+        "http_code" => $http_code,
+        "sub_info" => "Successful",
+        "upload" => $upload,
+        "download" => $download,
+        "used" => $used,
+        "total" => $total > 0 ? $total : "∞",
+        "surplus" => $surplus,
+        "percent" => round($percent, 1),
+        "day_left" => $day_left,
+        "expire" => $expireDate,
+        "get_time" => time()
+    ];
+}
+
+function saveSubInfoToFile($index, $subInfo) {
+    $libDir = __DIR__ . '/lib';
+    if (!is_dir($libDir)) mkdir($libDir, 0755, true);
+    $filePath = $libDir . '/sub_info_' . $index . '.json';
+    file_put_contents($filePath, json_encode($subInfo));
+}
+
+function getSubInfoFromFile($index) {
+    $filePath = __DIR__ . '/lib/sub_info_' . $index . '.json';
+    if (file_exists($filePath)) {
+        return json_decode(file_get_contents($filePath), true);
+    }
+    return null;
+}
+
+function clearSubInfo($index) {
+    $filePath = __DIR__ . '/lib/sub_info_' . $index . '.json';
+    if (file_exists($filePath)) {
+        unlink($filePath);
+        return true;
+    }
+    return false;
+}
+
+$subscriptions = getSubscriptionsFromFile();
+
+function autoCleanInvalidSubInfo($subscriptions) {
+    $maxSubscriptions = 6;
+    $cleaned = 0;
+    
+    for ($i = 0; $i < $maxSubscriptions; $i++) {
+        $url = trim($subscriptions[$i]['url'] ?? '');
+        
+        if (empty($url)) {
+            if (clearSubInfo($i)) {
+                $cleaned++;
+            }
+        }
+    }
+    
+    return $cleaned;
+}
+
+autoCleanInvalidSubInfo($subscriptions);
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update'])) {
     $index = intval($_POST['index']);
     $url = trim($_POST['subscription_url'] ?? '');
-    $customFileName = trim($_POST['custom_file_name'] ?? "subscription_" . ($index + 1) . ".yaml");  
+    $customFileName = trim($_POST['custom_file_name'] ?? "subscription_" . ($index + 1) . ".yaml");
 
     $subscriptions[$index]['url'] = $url;
     $subscriptions[$index]['file_name'] = $customFileName;
@@ -213,33 +338,28 @@ if (isset($_POST['update'])) {
         $tempPath = $subscriptionPath . $customFileName . ".temp";
         $finalPath = $subscriptionPath . $customFileName;
 
-        $command = "curl -s -L -o {$tempPath} {$url}";
+        $command = "curl -s -L -o {$tempPath} " . escapeshellarg($url);
         exec($command . ' 2>&1', $output, $return_var);
 
         if ($return_var !== 0) {
-            $command = "wget -q --show-progress -O {$tempPath} {$url}";
+            $command = "wget -q --show-progress -O {$tempPath} " . escapeshellarg($url);
             exec($command . ' 2>&1', $output, $return_var);
         }
 
-        if ($return_var === 0) {
-            $_SESSION['update_logs'] = [];
-            storeUpdateLog('<span data-translate="subscription_downloaded" data-dynamic-content="' . htmlspecialchars($url) . '"></span> <span data-translate="saved_to_temp_file" data-dynamic-content="' . htmlspecialchars($tempPath) . '"></span>');
-            //echo '<div class="log-message alert alert-warning custom-alert-success"><span data-translate="subscription_downloaded" data-dynamic-content="' . htmlspecialchars($url) . '"></span> <span data-translate="saved_to_temp_file" data-dynamic-content="' . htmlspecialchars($tempPath) . '"></span></div>';
+        if ($return_var === 0 && file_exists($tempPath)) {
+            //echo '<div class="log-message alert alert-warning custom-alert-success"><span data-translate="subscription_downloaded" data-dynamic-content="' . htmlspecialchars($url) . '"></span></div>';
+            
             $fileContent = file_get_contents($tempPath);
 
             if (base64_encode(base64_decode($fileContent, true)) === $fileContent) {
                 $decodedContent = base64_decode($fileContent);
                 if ($decodedContent !== false && strlen($decodedContent) > 0) {
                     file_put_contents($finalPath, "# Clash Meta Config\n\n" . $decodedContent);
-                    storeUpdateLog('<span data-translate="base64_decode_success" data-dynamic-content="' . htmlspecialchars($finalPath) . '"></span>');
                     echo '<div class="log-message alert alert-warning custom-alert-success"><span data-translate="base64_decode_success" data-dynamic-content="' . htmlspecialchars($finalPath) . '"></span></div>';
-                    unlink($tempPath); 
                     $notificationMessage = '<span data-translate="update_success"></span>';
                     $updateCompleted = true;
                 } else {
-                    storeUpdateLog('<span data-translate="base64_decode_failed"></span>');
                     echo '<div class="log-message alert alert-warning custom-alert-success"><span data-translate="base64_decode_failed"></span></div>';
-                    unlink($tempPath); 
                     $notificationMessage = '<span data-translate="update_failed"></span>';
                 }
             } 
@@ -247,40 +367,140 @@ if (isset($_POST['update'])) {
                 $decompressedContent = gzdecode($fileContent);
                 if ($decompressedContent !== false) {
                     file_put_contents($finalPath, "# Clash Meta Config\n\n" . $decompressedContent);
-                    storeUpdateLog('<span data-translate="gzip_decompress_success" data-dynamic-content="' . htmlspecialchars($finalPath) . '"></span>');
-                    echo '<div  class="log-message alert alert-warning custom-alert-success"><span data-translate="gzip_decompress_success" data-dynamic-content="' . htmlspecialchars($finalPath) . '"></span></div>';
-                    unlink($tempPath); 
+                    echo '<div class="log-message alert alert-warning custom-alert-success"><span data-translate="gzip_decompress_success" data-dynamic-content="' . htmlspecialchars($finalPath) . '"></span></div>';
                     $notificationMessage = '<span data-translate="update_success"></span>';
                     $updateCompleted = true;
                 } else {
-                    storeUpdateLog('<span data-translate="gzip_decompress_failed"></span>');
                     echo '<div class="log-message alert alert-warning custom-alert-success"><span data-translate="gzip_decompress_failed"></span></div>';
-                    unlink($tempPath); 
                     $notificationMessage = '<span data-translate="update_failed"></span>';
                 }
             } 
             else {
-                rename($tempPath, $finalPath); 
-                storeUpdateLog('<span data-translate="subscription_downloaded_no_decode"></span>');
-                echo '<div class="log-message alert alert-warning custom-alert-success"><span data-translate="subscription_downloaded_no_decode"></span></div>';
-                $notificationMessage = '<span data-translate="update_success"></span>';
-                $updateCompleted = true;
+                if (rename($tempPath, $finalPath)) {
+                    echo '<div class="log-message alert alert-warning custom-alert-success"><span data-translate="subscription_downloaded_no_decode"></span></div>';
+                    $notificationMessage = '<span data-translate="update_success"></span>';
+                    $updateCompleted = true;
+                }
+            }
+            
+            $userAgents = ["Clash","clash","ClashVerge","Stash","NekoBox","Quantumult%20X","Surge","Shadowrocket","V2rayU","Sub-Store","Mozilla/5.0"];
+            $subInfo = null;
+            foreach ($userAgents as $ua) {
+                $subInfo = getSubInfo($url, $ua);
+                if ($subInfo['sub_info'] === "Successful") break;
+            }
+            if ($subInfo) {
+                saveSubInfoToFile($index, $subInfo);
+            }
+            
+            if (file_exists($tempPath)) {
+                unlink($tempPath);
             }
         } else {
-            storeUpdateLog('<span data-translate="subscription_update_failed" data-dynamic-content="' . htmlspecialchars(implode("\n", $output)) . '"></span>');
             echo '<div class="log-message alert alert-warning custom-alert-success"><span data-translate="subscription_update_failed" data-dynamic-content="' . htmlspecialchars(implode("\n", $output)) . '"></span></div>';
-            unlink($tempPath); 
             $notificationMessage = '<span data-translate="update_failed"></span>';
+            if (file_exists($tempPath)) {
+                unlink($tempPath);
+            }
         }
     } else {
-        storeUpdateLog('<span data-translate="subscription_url_empty" data-dynamic-content="' . ($index + 1) . '"></span>');
+        clearSubInfo($index);
         $notificationMessage = '<span data-translate="update_failed"></span>';
     }
 
-    file_put_contents($subscriptionFile, json_encode($subscriptions));
+    file_put_contents($JSON_FILE, json_encode($subscriptions, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT));
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['updateAll'])) {
+    $updated = 0;
+    $failed = 0;
+    
+    for ($i = 0; $i < 6; $i++) {
+        $url = trim($subscriptions[$i]['url'] ?? '');
+        $customFileName = trim($subscriptions[$i]['file_name'] ?? "subscription_" . ($i + 1) . ".yaml");
+        
+        if (!empty($url)) {
+            $tempPath = $subscriptionPath . $customFileName . ".temp";
+            $finalPath = $subscriptionPath . $customFileName;
+
+            $command = "curl -s -L -o {$tempPath} " . escapeshellarg($url);
+            exec($command . ' 2>&1', $output, $return_var);
+
+            if ($return_var !== 0) {
+                $command = "wget -q --show-progress -O {$tempPath} " . escapeshellarg($url);
+                exec($command . ' 2>&1', $output, $return_var);
+            }
+
+            if ($return_var === 0 && file_exists($tempPath)) {
+                $fileContent = file_get_contents($tempPath);
+                $success = false;
+                
+                if (base64_encode(base64_decode($fileContent, true)) === $fileContent) {
+                    $decodedContent = base64_decode($fileContent);
+                    if ($decodedContent !== false && strlen($decodedContent) > 0) {
+                        file_put_contents($finalPath, "# Clash Meta Config\n\n" . $decodedContent);
+                        $success = true;
+                    }
+                } 
+                elseif (substr($fileContent, 0, 2) === "\x1f\x8b") {
+                    $decompressedContent = gzdecode($fileContent);
+                    if ($decompressedContent !== false) {
+                        file_put_contents($finalPath, "# Clash Meta Config\n\n" . $decompressedContent);
+                        $success = true;
+                    }
+                } 
+                else {
+                    if (rename($tempPath, $finalPath)) {
+                        $success = true;
+                    }
+                }
+                
+                if ($success) {
+                    $updated++;
+                    echo '<div class="log-message alert alert-warning custom-alert-success"><span data-translate="subscription_updated_success" data-index="' . ($i + 1) . '"></span></div>';
+                    
+                    $userAgents = ["Clash","clash","ClashVerge","Stash","NekoBox","Quantumult%20X","Surge","Shadowrocket","V2rayU","Sub-Store","Mozilla/5.0"];
+                    $subInfo = null;
+                    foreach ($userAgents as $ua) {
+                        $subInfo = getSubInfo($url, $ua);
+                        if ($subInfo['sub_info'] === "Successful") break;
+                    }
+                    if ($subInfo) {
+                        saveSubInfoToFile($i, $subInfo);
+                    }
+                } else {
+                    $failed++;
+                    echo '<div class="log-message alert alert-warning custom-alert-success"><span data-translate="subscription_updated_failed" data-index="' . ($i + 1) . '"></span></div>';
+                }
+                
+                if (file_exists($tempPath)) {
+                    unlink($tempPath);
+                }
+            } else {
+                $failed++;
+                echo '<div class="log-message alert alert-warning custom-alert-success"><span data-translate="subscription_updated_failed" data-index="' . ($i + 1) . '"></span></div>';
+                if (file_exists($tempPath)) {
+                    unlink($tempPath);
+                }
+            }
+        }
+    }
+    
+    if ($updated > 0) {
+        $notificationMessage = '<span data-translate="update_all_success" data-count="' . $updated . '"></span>';
+        $updateCompleted = true;
+    } else {
+        $notificationMessage = '<span data-translate="update_all_failed"></span>';
+    }
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['clear'])) {
+    $index = $_POST['index'] ?? 0;
+    clearSubInfo($index);
+    header('Location: ' . $_SERVER['PHP_SELF']);
+    exit;
 }
 ?>
-
 <?php
 $shellScriptPath = '/etc/neko/core/update_mihomo.sh';
 $LOG_FILE = '/etc/neko/tmp/log.txt'; 
@@ -457,6 +677,19 @@ function download_file($url, $destination) {
 }
 ?>
 
+<?php
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['clearJsonFile'])) {
+    $fileToClear = $_POST['clearJsonFile'];
+    if ($fileToClear === 'subscriptions.json') {
+        $filePath = '/etc/neko/proxy_provider/subscriptions.json';
+        if (file_exists($filePath)) {
+            file_put_contents($filePath, '[]');
+            echo '<div class="log-message alert alert-warning custom-alert-success"><span data-translate="subscriptionClearedSuccess">Subscription information cleared successfully</span></div>';
+        }
+    }
+}
+?>
+
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -516,6 +749,19 @@ function download_file($url, $destination) {
 
 .table-hover tbody tr:hover td {
     color: #cc0fa9;
+}
+
+.node-count-badge {
+    position: absolute;
+    top: 1.4rem;
+    right: 0.9rem;
+    background-color: var(--accent-color);
+    color: #fff;
+    padding: 0.2rem 0.5rem;
+    border-radius: 0.5rem;
+    font-size: 0.75rem;
+    font-weight: bold;
+    z-index: 10;
 }
 </style>
 <?php if ($updateCompleted): ?>
@@ -585,14 +831,14 @@ $(document).ready(function() {
     }
 });
 </script>
-<div class="container-sm container-bg mt-4">
+<div class="container-sm container-bg px-0 px-sm-4 mt-4">
 <nav class="navbar navbar-expand-lg sticky-top">
-    <div class="container-sm container">
+    <div class="container-sm container px-4 px-sm-3 px-md-4">
         <a class="navbar-brand d-flex align-items-center" href="#">
             <?= $iconHtml ?>
             <span style="color: var(--accent-color); letter-spacing: 1px;"><?= htmlspecialchars($title) ?></span>
         </a>
-        <button class="navbar-toggler" type="button" style="position: relative; z-index: 1;" data-bs-toggle="collapse" data-bs-target="#navbarContent">
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarContent">
             <i class="bi bi-list" style="color: var(--accent-color); font-size: 1.8rem;"></i>
         </button>
         <div class="collapse navbar-collapse" id="navbarContent">
@@ -613,6 +859,9 @@ $(document).ready(function() {
                     <a class="nav-link <?= $current == 'mihomo.php' ? 'active' : '' ?>" href="./mihomo.php"><i class="bi bi-building"></i> <span data-translate="template_iii">Template III</span></a>
                 </li>
                 <li class="nav-item">
+                    <a class="nav-link <?= $current == 'netmon.php' ? 'active' : '' ?>" href="./netmon.php"><i class="bi bi-activity"></i> <span data-translate="traffic_monitor">Traffic Monitor</span></a>
+                </li>
+                <li class="nav-item">
                     <a class="nav-link <?= $current == 'monaco.php' ? 'active' : '' ?>" href="./monaco.php"><i class="bi bi-bank"></i> <span data-translate="pageTitle">File Assistant</span></a>
                 </li>
             </ul>
@@ -630,54 +879,123 @@ $(document).ready(function() {
         </div>
     </div>
 </nav>
+
+<style>
+.card {
+    position: relative;
+}
+
+.sub-info {
+    display: none;
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    background: var(--accent-color);
+    color: #fff;
+    padding: 5px 10px;
+    border-top: 1px solid #ccc;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+    white-space: nowrap;
+    z-index: 10;
+}
+
+.card:hover .sub-info {
+    display: block;
+}
+
+.update-indicator {
+    position: absolute;
+    top: 15px;
+    right: 15px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #28a745;
+    animation: pulse-success 2s infinite;
+    box-shadow: 0 0 0 0 rgba(40, 167, 69, 0.7);
+    transition: all 0.3s ease;
+}
+
+.update-indicator.failed {
+    background: #dc3545;
+    animation: pulse-error 2s infinite;
+    box-shadow: 0 0 0 0 rgba(220, 53, 69, 0.7);
+}
+
+.update-indicator:hover {
+    transform: scale(1.2);
+}
+
+@keyframes pulse-success {
+    0% {
+        transform: scale(0.95);
+        box-shadow: 0 0 0 0 rgba(40, 167, 69, 0.7);
+    }
+    
+    50% {
+        transform: scale(1);
+        box-shadow: 0 0 0 8px rgba(40, 167, 69, 0);
+    }
+    
+    100% {
+        transform: scale(0.95);
+        box-shadow: 0 0 0 0 rgba(40, 167, 69, 0);
+    }
+}
+
+@keyframes pulse-error {
+    0% {
+        transform: scale(0.95);
+        box-shadow: 0 0 0 0 rgba(220, 53, 69, 0.7);
+    }
+    
+    50% {
+        transform: scale(1);
+        box-shadow: 0 0 0 8px rgba(220, 53, 69, 0);
+    }
+    
+    100% {
+        transform: scale(0.95);
+        box-shadow: 0 0 0 0 rgba(220, 53, 69, 0);
+    }
+}
+
+.clear-json-btn {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.95rem;
+    min-height: 1.5em;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: #dc3545;
+    color: #fff;
+    border: none;
+    border-radius: 0.5rem;
+    z-index: 11;
+    line-height: 1;
+}
+
+.clear-json-btn i {
+    display: block;
+    font-size: inherit;
+    line-height: 1;
+}
+
+.clear-json-btn:hover {
+    background-color: #c82333;
+}
+
+@media (max-width: 768px) {
+    .clear-json-btn {
+        padding: 0.5rem 1.1rem;
+        font-size: 1.1rem;
+        min-height: 1.8em;
+    }
+}
+</style>
+
 <h2 class="container-fluid text-center mt-4 mb-4" data-translate="subscriptionManagement"></h2>
-<div class="container-sm text-center px-2 px-md-3">
-    <?php if (isset($message) && $message): ?>
-        <div class="alert alert-info">
-            <?php echo nl2br(htmlspecialchars($message)); ?>
-        </div>
-    <?php endif; ?>
-    <?php if (isset($subscriptions) && is_array($subscriptions)): ?>
-        <div class="container-fluid px-3">
-            <?php 
-            $maxSubscriptions = 6;
-            for ($i = 0; $i < $maxSubscriptions; $i++):
-                $displayIndex = $i + 1;
-                $url = $subscriptions[$i]['url'] ?? '';
-                $fileName = $subscriptions[$i]['file_name'] ?? "subscription_" . $displayIndex . ".yaml";
-                
-                if ($i % 3 == 0) echo '<div class="row">';
-            ?>
-                <div class="col-md-4 mb-3 px-1">
-                    <div class="card">
-                        <form method="post">
-                            <div class="card-body">
-                                <div class="form-group">
-                                    <h5 class="mb-2" data-translate="subscriptionLink"><?php echo $displayIndex; ?></h5>
-                                    <input type="text" name="subscription_url" id="subscription_url_<?php echo $displayIndex; ?>" value="<?php echo htmlspecialchars($url); ?>" class="form-control" data-translate-placeholder="enterSubscriptionUrl">
-                                </div>
-                                <div class="form-group">
-                                    <label for="custom_file_name_<?php echo $displayIndex; ?>" data-translate="customFileName"></label>
-                                    <input type="text" name="custom_file_name" id="custom_file_name_<?php echo $displayIndex; ?>" value="<?php echo htmlspecialchars($fileName); ?>" class="form-control">
-                                </div>
-                                <input type="hidden" name="index" value="<?php echo $i; ?>">
-                                <div class="text-center mt-3">
-                                    <button type="submit" name="update" class="btn btn-info btn-block">
-                                        <i class="bi bi-arrow-repeat"></i> <span data-translate="updateSubscription">Settings</span> <?php echo $displayIndex; ?>
-                                    </button>
-                                </div>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-            <?php 
-                if ($i % 3 == 2 || $i == $maxSubscriptions - 1) echo '</div>';
-            endfor;
-            ?>
-        </div>
-    <?php else: ?>
-    <?php endif; ?>
-</div>
 
 <div class="text-center mt-4 mb-1">
     <form method="post">
@@ -689,13 +1007,96 @@ $(document).ready(function() {
             <i class="bi bi-terminal"></i> <span data-translate="generate_update_script"></span>
         </button>
         
+        <button type="submit" name="updateAll" value="true" class="btn btn-warning mx-1 mb-2">
+            <i class="bi bi-arrow-repeat"></i> <span data-translate="update_all_subscriptions"></span>
+        </button>
+        
         <button type="button" class="btn btn-info mx-1 mb-2" data-bs-toggle="modal" data-bs-target="#downloadModal">
             <i class="bi bi-download"></i> <span data-translate="update_database"></span>
         </button>
     </form>
 </div>
 
-<h2 class="text-center mt-4 mb-3" data-translate="fileManagement">File Management</h2>
+<div class="container-sm text-center px-2 px-md-3">
+    <?php if (isset($subscriptions) && is_array($subscriptions)): ?>
+        <div class="container-fluid px-3">
+            <?php 
+            $maxSubscriptions = 6;
+            for ($i = 0; $i < $maxSubscriptions; $i++):
+                $displayIndex = $i + 1;
+                $url = $subscriptions[$i]['url'] ?? '';
+                $fileName = $subscriptions[$i]['file_name'] ?? "subscription_" . $displayIndex . ".yaml";
+
+                $subInfo = getSubInfoFromFile($i);
+
+                if ($i % 3 == 0) echo '<div class="row">';
+            ?>
+                <div class="col-md-4 mb-3 px-1">
+                    <div class="card">
+                        <?php if (!empty($url)): ?>
+                            <div class="update-indicator <?php 
+                                if (empty($subInfo)) echo 'failed';
+                            ?>" title="<?php 
+                                if (empty($subInfo)) {
+                                    echo htmlspecialchars($translations['noSubInfo'] ?? 'No subscription information obtained');
+                                } else {
+                                    echo htmlspecialchars($translations['subInfoObtained'] ?? 'Subscription information obtained');
+                                }
+                            ?>"></div>
+                        <?php endif; ?>
+                        
+                        <form method="post">
+                            <div class="card-body">
+                                <div class="form-group">
+                                    <h5 class="mb-2" data-translate="subscriptionLink"><?php echo $displayIndex; ?></h5>
+                                    <input type="text" name="subscription_url" id="subscription_url_<?php echo $displayIndex; ?>" value="<?php echo htmlspecialchars($url); ?>" class="form-control" data-translate-placeholder="enterSubscriptionUrl">
+                                </div>
+
+                                <div class="form-group">
+                                    <label for="custom_file_name_<?php echo $displayIndex; ?>" data-translate="customFileName"></label>
+                                    <input type="text" name="custom_file_name" id="custom_file_name_<?php echo $displayIndex; ?>" value="<?php echo htmlspecialchars($fileName); ?>" class="form-control">
+                                </div>
+
+                                <input type="hidden" name="index" value="<?php echo $i; ?>">
+
+                                <?php if (!empty($subInfo) && $subInfo['sub_info'] === "Successful"): ?>
+                                    <div class="sub-info">
+                                        <?php
+                                        $total   = formatBytes($subInfo['total']);
+                                        $used    = formatBytes($subInfo['used']);
+                                        $percent = $subInfo['percent'];
+                                        $dayLeft = $subInfo['day_left'];
+                                        $expire  = $subInfo['expire'];
+                                        $remainingLabel = $translations['resetDaysLeftLabel'] ?? 'Remaining';
+                                        $daysUnit       = $translations['daysUnit'] ?? 'days';
+                                        $expireLabel    = $translations['expireDateLabel'] ?? 'Expires';
+                                        echo "{$used} / {$total} ({$percent}%) • {$remainingLabel} {$dayLeft} {$daysUnit} • {$expireLabel}: {$expire}";
+                                        ?>
+                                    </div>
+                                <?php elseif (!empty($subInfo)): ?>
+                                    <div class="sub-info">
+                                        <span data-translate="subscriptionFetchFailed"></span>: <?php echo htmlspecialchars($subInfo['sub_info']); ?>
+                                    </div>
+                                <?php endif; ?>
+
+                                <div class="text-center mt-3">
+                                    <button type="submit" name="update" class="btn btn-primary btn-block">
+                                        <i class="bi bi-arrow-repeat"></i> 
+                                        <span data-translate="updateSubscription">Settings</span> <?php echo $displayIndex; ?>
+                                    </button>
+                                </div>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            <?php 
+                if ($i % 3 == 2 || $i == $maxSubscriptions - 1) echo '</div>';
+            endfor; ?>
+        </div>
+    <?php endif; ?>
+</div>
+
+<h2 class="text-center mt-3 mb-4" data-translate="fileManagement">File Management</h2>
 
 <div class="container-sm px-3 px-md-4">
   <div class="row g-3">
@@ -724,11 +1125,115 @@ $(document).ready(function() {
       $isProxy = ($index < count($proxyFiles));
       $size = file_exists($filePath) ? formatSize(filesize($filePath)) : ($translations['fileNotExist'] ?? 'Not Exist');
       $modified = file_exists($filePath) ? date('Y-m-d H:i:s', filemtime($filePath)) : '-';
+
+      $validProtocols = '/^(ss|shadowsocks|vmess|vless|trojan|hysteria2|socks5|http)$/i';
+      $nodeCount = 0;
+
+      if (file_exists($filePath)) {
+          $content = file_get_contents($filePath);
+
+          $json = json_decode($content, true);
+          if (json_last_error() === JSON_ERROR_NONE && isset($json['outbounds']) && is_array($json['outbounds'])) {
+              foreach ($json['outbounds'] as $outbound) {
+                  if (!empty($outbound['type']) && preg_match($validProtocols, $outbound['type'])) {
+                      $nodeCount++;
+                  }
+              }
+          } else {
+              if (preg_match('/^\s*proxies\s*:/im', $content, $matches, PREG_OFFSET_CAPTURE)) {
+                  $start = $matches[0][1] + strlen($matches[0][0]);
+                  $rest = substr($content, $start);
+                  $lines = preg_split("/\r?\n/", $rest);
+            
+                  $hasRealProxies = false;
+                  foreach ($lines as $line) {
+                      $line = trim($line);
+                      if ($line === '' || str_starts_with($line, '#')) continue;
+                
+                      if (preg_match('/^\-\s*(\{|.*type.*:)/', $line)) {
+                          $hasRealProxies = true;
+                          break;
+                      }
+                  }
+            
+                  if (!$hasRealProxies) {
+                      $nodeCount = 0;
+                  } else {
+                      foreach ($lines as $line) {
+                          $line = trim($line);
+                          if ($line === '' || str_starts_with($line, '#')) continue;
+                    
+                          if (preg_match('/^\-\s*\{.*\}$/', $line)) {
+                              if (preg_match('/^\-\s*\{(.*)\}\s*$/', $line, $match)) {
+                                  $objContent = $match[1];
+                            
+                                  $pairs = preg_split('/\s*,\s*/', $objContent);
+                                  $typeFound = false;
+                            
+                                  foreach ($pairs as $pair) {
+                                      if (preg_match('/^\s*(\w+)\s*:\s*(.+?)\s*$/', $pair, $kvMatch)) {
+                                          $key = $kvMatch[1];
+                                          $value = trim($kvMatch[2], " '\"");
+                                     
+                                          if ($key === 'type' && preg_match($validProtocols, $value)) {
+                                              $nodeCount++;
+                                              $typeFound = true;
+                                              break;
+                                          }
+                                      }
+                                  }
+                            
+                                  if (!$typeFound) {
+                                      $objStr = '{' . $objContent . '}';
+                                      $objStrClean = preg_replace("/(['\"])?([a-zA-Z0-9_]+)(['\"])?\s*:/", '"$2":', $objStr);
+                                      $objStrClean = str_replace("'", '"', $objStrClean);
+                                      $obj = json_decode($objStrClean, true);
+                                      if (json_last_error() === JSON_ERROR_NONE && isset($obj['type']) && preg_match($validProtocols, $obj['type'])) {
+                                          $nodeCount++;
+                                      }
+                                  }
+                              }
+                          } 
+                          elseif (preg_match('/type\s*:\s*["\']?(\w+)["\']?/i', $line, $match)) {
+                              if (preg_match($validProtocols, $match[1])) {
+                                   $nodeCount++;
+                              }
+                          }
+                      }
+                  }
+              }
+              elseif (preg_match('/^(ss|vmess|vless|trojan|hysteria2|socks5|http):\/\//im', $content)) {
+                  $lines = preg_split("/\r?\n/", $content);
+                  foreach ($lines as $line) {
+                      $line = trim($line);
+                      if ($line === '' || str_starts_with($line, '#')) continue;
+                      if (preg_match('/^(ss|vmess|vless|trojan|hysteria2|socks5|http):\/\//i', $line)) {
+                          $nodeCount++;
+                      }
+                  }
+              }
+              else {
+                  $nodeCount = 0;
+              }
+          }
+      }
     ?>
     <div class="col-12 col-md-6 col-lg-3">
-      <div class="card h-100 text-start">
+      <div class="card h-100 text-start position-relative">
+        <?php if ($file === 'subscriptions.json'): ?>
+        <form method="post" class="position-absolute m-0 p-0" 
+              style="top: 1.4rem; right: 5.2rem;">
+            <input type="hidden" name="clearJsonFile" value="<?= htmlspecialchars($file) ?>">
+            <button type="submit" class="btn btn-sm btn-outline-danger clear-json-btn" 
+                    onclick="return confirm('<?= htmlspecialchars($translations['confirmClearJson'] ?? 'Are you sure to clear all subscription links?') ?>');" 
+                    data-tooltip="clearJsonTooltip">
+              <i class="bi bi-trash"></i>
+            </button>
+        </form>
+        <?php endif; ?>
+        <span class="node-count-badge"><span class="node-number"><?= $nodeCount ?></span> <span data-translate="nodesLabel">Nodes</span></span>
         <div class="card-body d-flex flex-column justify-content-between">
-          <h5 class="card-title mb-2" data-tooltip="fileName"><?= htmlspecialchars($file) ?></h5>
+          <h5 class="card-title mb-2" <?= $file === 'subscriptions.json' ? '' : 'data-tooltip="fileName"' ?>><?= htmlspecialchars($file) ?></h5>
           <p class="card-text mb-1"><strong data-translate="fileSize">Size</strong>: <?= $size ?></p>
           <p class="card-text mb-1"><strong data-translate="lastModified">Last Modified</strong>: <?= $modified ?></p>
           <p class="card-text mb-2"><strong data-translate="fileType">Type</strong>: <span class="badge <?= $isProxy ? 'bg-primary' : 'bg-success' ?>"><?= htmlspecialchars($fileTypes[$index]) ?></span></p>
@@ -743,27 +1248,101 @@ $(document).ready(function() {
               $line = trim($line);
               if (empty($line)) continue;
 
-              if (preg_match('/訂閱資訊[:：]\s*([\d.]+)\s*(T|TB|G|GB|M|MB|K|KB)?(?:\s*\/\s*剩餘\s*(\d+)?\s*天)?(?:\s*\/\s*到期\s*(\d{4}-\d{2}-\d{2}))?/iu', $line, $matches)) {
+              if (preg_match('/訂閱資訊[:：]\s*([\d.]+)\s*(T|TB|G|GB|M|MB|K|KB)?(?:\s*\/\s*(?:剩餘|剩余)\s*(\d+)\s*天)?(?:\s*\/\s*(?:到期|expire)\s*(\d{4}-\d{2}-\d{2}))?/iu', $line, $matches)) {
                   if (!empty($matches[1])) {
                      $flowLeft = $matches[1] . strtoupper($matches[2] ?? 'MB');
                   }
-                  if (isset($matches[3])) {
-                      $resetDaysLeft = $matches[3] !== '' ? $matches[3] : '0';
+                  if (isset($matches[3]) && $matches[3] !== '') {
+                      $resetDaysLeft = $matches[3];
                   }
                   if (!empty($matches[4])) {
                       $expireDateText = $matches[4];
                   }
+                  break;
               } elseif (preg_match('/#(.*)$/', $line, $matches)) {
                   $hashComment = urldecode(trim($matches[1]));
 
-                  if (preg_match('/剩余流量[:：]\s*([\d.]+)\s*(T|TB|G|GB|M|MB|K|KB)?(?:\s|$)/iu', $hashComment, $flowMatch)) {
+                  if (preg_match('/(?:剩余流量|流量)[:：]\s*([\d.]+)\s*(T|TB|G|GB|M|MB|K|KB)?(?:\s|$)/iu', $hashComment, $flowMatch)) {
                       $flowLeft = $flowMatch[1] . strtoupper($flowMatch[2] ?? 'MB');
                   }
-                  if (preg_match('/距离下次重置剩余[:：]\s*(\d+)\s*天/u', $hashComment, $resetMatch)) {
+
+                  if (preg_match('/(?:距离下次重置剩余|距离|重置)[:：]\s*(\d+)\s*天/u', $hashComment, $resetMatch)) {
                       $resetDaysLeft = $resetMatch[1];
                   }
-                  if (preg_match('/套餐到期[:：]\s*(\d{4}-\d{2}-\d{2})/u', $hashComment, $dateMatch)) {
+
+                  if (preg_match('/(?:套餐到期|套餐|到期)[:：]\s*(\d{4}-\d{2}-\d{2})/u', $hashComment, $dateMatch)) {
                       $expireDateText = $dateMatch[1];
+                  }
+              }
+          }
+
+          if (empty($resetDaysLeft) && !empty($expireDateText)) {
+              $currentDate = date('Y-m-d');
+              $expireTimestamp = strtotime($expireDateText . ' 23:59:59');
+              $currentTimestamp = strtotime($currentDate);
+    
+              if ($expireTimestamp !== false && $currentTimestamp !== false) {
+                  $daysLeft = ceil(($expireTimestamp - $currentTimestamp) / (60 * 60 * 24));
+                  $resetDaysLeft = (string)$daysLeft;
+              }
+          }
+
+          $needMoreInfo = empty($flowLeft) || empty($resetDaysLeft) || empty($expireDateText);
+          if ($needMoreInfo) {
+              $fileContent = file_get_contents($filePath);
+    
+              $config = json_decode($fileContent, true);
+    
+              if (json_last_error() === JSON_ERROR_NONE && is_array($config)) {
+                  if (isset($config['outbounds']) && is_array($config['outbounds'])) {
+                      foreach ($config['outbounds'] as $outbound) {
+                          if (isset($outbound['tag'])) {
+                              $tag = $outbound['tag'];
+                    
+                              if (empty($flowLeft) && preg_match('/(?:剩余流量|剩余|流量)[:：]\s*([\d.]+)\s*(T|TB|G|GB|M|MB|K|KB)?/iu', $tag, $matches)) {
+                                   $flowLeft = $matches[1] . strtoupper($matches[2] ?? 'MB');
+                              }
+                    
+                              if (empty($resetDaysLeft) && preg_match('/(?:距离下次重置剩余|距离|重置)[:：]\s*(\d+)\s*天/u', $tag, $matches)) {
+                                   $resetDaysLeft = $matches[1];
+                              }
+                    
+                              if (empty($expireDateText) && preg_match('/(?:套餐到期|套餐|到期)[:：]\s*(\d{4}-\d{2}-\d{2})/u', $tag, $matches)) {
+                                  $expireDateText = $matches[1];
+                              }
+                           }
+                
+                          if (!empty($flowLeft) && !empty($resetDaysLeft) && !empty($expireDateText)) {
+                              break;
+                          }
+                      }
+                  }
+        
+                  if (isset($config['tag'])) {
+                      $tag = $config['tag'];
+            
+                      if (empty($flowLeft) && preg_match('/(?:剩余流量|剩余|流量)[:：]\s*([\d.]+)\s*(T|TB|G|GB|M|MB|K|KB)?/iu', $tag, $matches)) {
+                           $flowLeft = $matches[1] . strtoupper($matches[2] ?? 'MB');
+                      }
+            
+                      if (empty($resetDaysLeft) && preg_match('/(?:距离下次重置剩余|距离|重置)[:：]\s*(\d+)\s*天/u', $tag, $matches)) {
+                          $resetDaysLeft = $matches[1];
+                       }
+            
+                      if (empty($expireDateText) && preg_match('/(?:套餐到期|套餐|到期)[:：]\s*(\d{4}-\d{2}-\d{2})/u', $tag, $matches)) {
+                           $expireDateText = $matches[1];
+                      }
+                  }
+        
+                  if (empty($resetDaysLeft) && !empty($expireDateText)) {
+                      $currentDate = date('Y-m-d');
+                      $expireTimestamp = strtotime($expireDateText . ' 23:59:59');
+                      $currentTimestamp = strtotime($currentDate);
+            
+                      if ($expireTimestamp !== false && $currentTimestamp !== false) {
+                          $daysLeft = floor(($expireTimestamp - $currentTimestamp) / (60 * 60 * 24));
+                          $resetDaysLeft = (string)$daysLeft;
+                      }
                   }
               }
           }
@@ -786,14 +1365,19 @@ $(document).ready(function() {
                   $infoParts[] = $flowLeft;
               }
 
-              if ($resetDaysLeft !== '') {
-                  $infoParts[] = 
-                      ($translations['resetDaysLeftLabel'] ?? 'Remaining') . ' ' 
-                      . $resetDaysLeft . ' ' 
-                      . ($translations['daysUnit'] ?? 'days');
+              if ($hasResetDays) {
+                  $days = (int)$resetDaysLeft;
+                  if ($days < 0) {
+                      $infoParts[] = '<span style="color: red;">已过期 ' . abs($days) . ' 天</span>';
+                  } else {
+                      $infoParts[] = 
+                          ($translations['resetDaysLeftLabel'] ?? 'Remaining') . ' ' 
+                          . $resetDaysLeft . ' ' 
+                          . ($translations['daysUnit'] ?? 'days');
+                  }
               }
 
-              if ($expireDateText) {
+              if ($hasExpireDate) {
                   $currentDate = date('Y-m-d');
                   $isExpired = strtotime($expireDateText) < strtotime($currentDate);
                   $expireText = ($translations['expireDateLabel'] ?? 'Expires') . ' ' . $expireDateText;
@@ -917,7 +1501,6 @@ $(document).ready(function() {
             </div>
             <div class="modal-footer justify-content-end">
                 <button type="button" class="btn btn-pink" onclick="openFullScreenEditor()" data-translate="advancedEdit"></button>
-                <button id="aceScriptToggleBtn" class="btn btn-secondary" onclick="toggleAceScript()"><i id="aceIcon" class="bi bi-code-slash"></i> <span id="aceLabel"></span></button>
                 <button type="submit" form="editForm" class="btn btn-primary" data-translate="save"></button>
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" data-translate="close"></button>
             </div>
@@ -1003,55 +1586,43 @@ $(document).ready(function() {
 </div>
 
 <script>
-let aceEnabled = null;
-
-function checkAceScript() {
-    fetch('ace_loader.php?action=check')
-        .then(response => response.text())
-        .then(result => {
-            aceEnabled = (result.trim() === '1');
-            updateAceButton();
-        });
-}
-
-function toggleAceScript() {
-    const action = aceEnabled ? 'remove' : 'add';
-    fetch('ace_loader.php?action=' + action)
-        .then(response => response.text())
-        .then(result => {
-            aceEnabled = !aceEnabled;
-            updateAceButton();
-            document.getElementById('aceScriptStatus').innerText = result;
-        })
-        .catch(error => {
-            document.getElementById('aceScriptStatus').innerText = '请求失败: ' + error;
-        });
-}
-
-function updateAceButton() {
-    const btn = document.getElementById('aceScriptToggleBtn');
-    const icon = document.getElementById('aceIcon');
-    const label = document.getElementById('aceLabel');
-
-    if (aceEnabled) {
-        btn.className = 'btn btn-danger';
-        icon.className = 'bi bi-x-circle';
-        label.textContent = langData[currentLang]?.remove_ace || 'Remove Ace Component';
-    } else {
-        btn.className = 'btn btn-success';
-        icon.className = 'bi bi-plus-circle';
-        label.textContent = langData[currentLang]?.add_ace || 'Add Ace Component';
-    }
-}
-
-checkAceScript();
-</script>
-
-<script>
 let isJsonDetected = false;
 let aceEditorInstance;
+let aceLoaded = false;
 
-function initializeAceEditor() {
+function loadAceEditor() {
+    return new Promise((resolve, reject) => {
+        if (aceLoaded && window.ace) {
+            resolve();
+            return;
+        }
+
+        const aceScript = document.createElement('script');
+        aceScript.src = 'https://cdnjs.cloudflare.com/ajax/libs/ace/1.4.12/ace.js';
+        
+        aceScript.onload = () => {
+            aceLoaded = true;
+            resolve();
+        };
+
+        aceScript.onerror = () => {
+            reject(new Error('Failed to load ACE Editor'));
+        };
+
+        document.head.appendChild(aceScript);
+    });
+}
+
+async function initializeAceEditor() {
+    if (!aceLoaded) {
+        try {
+            await loadAceEditor();
+        } catch (error) {
+            console.error('Failed to load ACE Editor:', error);
+            return;
+        }
+    }
+
     aceEditorInstance = ace.edit("aceEditorContainer");
     const savedTheme = localStorage.getItem("editorTheme") || "ace/theme/vibrant_ink";
     aceEditorInstance.setTheme(savedTheme);
@@ -1072,7 +1643,11 @@ function initializeAceEditor() {
     detectContentFormat();
 }
 
-function openFullScreenEditor() {
+async function openFullScreenEditor() {
+    if (!aceEditorInstance) {
+        await initializeAceEditor();
+    }
+    
     aceEditorInstance.setValue(document.getElementById('fileContent').value, -1);
     $('#fullScreenEditorModal').modal('show');
     updateEditorStatus();
@@ -1337,7 +1912,6 @@ function updateEditorStatus() {
 }
 
 $(document).ready(() => {
-    initializeAceEditor();
 });
 
 document.addEventListener('DOMContentLoaded', () => {

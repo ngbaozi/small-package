@@ -4,14 +4,22 @@ local uci = require "luci.model.uci".cursor()
 -- 获取 LAN IP 地址
 function lanip()
 	local lan_ip
-	lan_ip = luci.sys.exec("uci -q get network.lan.ipaddr 2>/dev/null | awk -F '/' '{print $1}' | tr -d '\n'")
 
+	-- 尝试从 UCI 直接读取
+	lan_ip = luci.sys.exec("uci -q get network.lan.ipaddr 2>/dev/null | awk -F'/' '{print $1}' | tr -d '\\n'")
+
+	-- 尝试从 LAN 接口信息中读取（优先 ifname，再 fallback 到 device）
 	if not lan_ip or lan_ip == "" then
-    	lan_ip = luci.sys.exec("ip address show $(uci -q -p /tmp/state get network.lan.ifname || uci -q -p /tmp/state get network.lan.device) | grep -w 'inet' | grep -Eo 'inet [0-9\.]+' | awk '{print $2}' | head -1 | tr -d '\n'")
+		lan_ip = luci.sys.exec([[
+ip -4 addr show $(uci -q -p /tmp/state get network.lan.ifname || uci -q -p /tmp/state get network.lan.device) 2>/dev/null \
+  | grep -w 'inet' | awk '{print $2}' | cut -d'/' -f1 | grep -v '^127\.' | head -n1 | tr -d '\n']])
 	end
 
+	-- 取任意一个 global IPv4 地址
 	if not lan_ip or lan_ip == "" then
-    	lan_ip = luci.sys.exec("ip addr show | grep -w 'inet' | grep 'global' | grep -Eo 'inet [0-9\.]+' | awk '{print $2}' | head -n 1 | tr -d '\n'")
+		lan_ip = luci.sys.exec([[
+ip -4 addr show scope global 2>/dev/null \
+  | grep -w 'inet' | awk '{print $2}' | cut -d'/' -f1 | grep -v '^127\.' | head -n1 | tr -d '\n']])
 	end
 
 	return lan_ip
@@ -367,7 +375,7 @@ if is_finded("xray") then
 	o.default = "10-20"
 	o:depends("fragment", true)
 
-	o = s:option(Value, "fragment_maxsplit", translate("Fragment maxSplit"), translate("Fragmented maxSplit (byte)"))
+	o = s:option(Value, "fragment_maxsplit", translate("Max Split"), translate("Limit the maximum number of splits."))
 	o.default = "100-200"
 	o:depends("fragment", true)
 
@@ -421,9 +429,9 @@ if is_finded("xray") then
 	o.datatype = "or(uinteger,portrange)"
 	o.rmempty = false
 
-	o = s:option(Value, "applyto", translate("ApplyTo (IP type)"))
+	o = s:option(Value, "applyto", translate("IP Type"))
 	o.default = "IP"
-	o:value("IP", "IP")
+	o:value("IP", "ALL")
 	o:value("IPV4", "IPv4")
 	o:value("IPV6", "IPv6")
 	o.rmempty = false

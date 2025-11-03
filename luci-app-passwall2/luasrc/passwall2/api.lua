@@ -337,41 +337,28 @@ function is_special_node(e)
 end
 
 function is_ip(val)
-	if is_ipv6(val) then
-		val = get_ipv6_only(val)
-	end
-	return datatypes.ipaddr(val)
+	local str = val:match("%[(.-)%]") or val
+	return datatypes.ipaddr(str) or false
 end
 
 function is_ipv6(val)
-	local str = val
-	local address = val:match('%[(.*)%]')
-	if address then
-		str = address
-	end
-	if datatypes.ip6addr(str) then
-		return true
-	end
-	return false
+	local str = val:match("%[(.-)%]") or val
+	return datatypes.ip6addr(str) or false
 end
 
 function is_ipv6addrport(val)
-	if is_ipv6(val) then
-		local address, port = val:match('%[(.*)%]:([^:]+)$')
-		if port then
-			return datatypes.port(port)
-		end
+	local address, port = val:match("%[(.-)%]:([0-9]+)$")
+	if address and datatypes.ip6addr(address) and datatypes.port(port) then
+		return true
 	end
 	return false
 end
 
 function get_ipv6_only(val)
 	local result = ""
-	if is_ipv6(val) then
-		result = val
-		if val:match('%[(.*)%]') then
-			result = val:match('%[(.*)%]')
-		end
+	local inner = val:match("%[(.-)%]") or val
+	if datatypes.ip6addr(inner) then
+		result = inner
 	end
 	return result
 end
@@ -380,7 +367,7 @@ function get_ipv6_full(val)
 	local result = ""
 	if is_ipv6(val) then
 		result = val
-		if not val:match('%[(.*)%]') then
+		if not val:match("%[.-%]") then
 			result = "[" .. result .. "]"
 		end
 	end
@@ -463,7 +450,8 @@ function get_valid_nodes()
 				e["node_type"] = "special"
 				nodes[#nodes + 1] = e
 			end
-			if e.port and e.address then
+			local port = e.port or e.hysteria_hop or e.hysteria2_hop
+			if port and e.address then
 				local address = e.address
 				if is_ip(address) or datatypes.hostname(address) then
 					local type = e.type
@@ -496,7 +484,8 @@ function get_valid_nodes()
 					if is_ipv6(address) then address = get_ipv6_full(address) end
 					e["remark"] = "%s：[%s]" % {type, e.remarks}
 					if show_node_info == "1" then
-						e["remark"] = "%s：[%s] %s:%s" % {type, e.remarks, address, e.port}
+						port = port:gsub(":", "-")
+						e["remark"] = "%s：[%s] %s:%s" % {type, e.remarks, address, port}
 					end
 					e.node_type = "normal"
 					nodes[#nodes + 1] = e
@@ -549,8 +538,10 @@ end
 function get_full_node_remarks(n)
 	local remarks = get_node_remarks(n)
 	if #remarks > 0 then
-		if n.address and n.port then
-			remarks = remarks .. " " .. n.address .. ":" .. n.port
+		local port = n.port or n.hysteria_hop or n.hysteria2_hop
+		if n.address and port then
+			port = port:gsub(":", "-")
+			remarks = remarks .. " " .. n.address .. ":" .. port
 		end
 	end
 	return remarks
@@ -1001,7 +992,7 @@ function to_download(app_name, url, size)
 	end
 
 	local _curl_args = clone(curl_args)
-	table.insert(_curl_args, "-m 60")
+	table.insert(_curl_args, "--speed-limit 51200 --speed-time 15 --max-time 300")
 
 	local return_code, result = curl_logic(url, tmp_file, _curl_args)
 	result = return_code == 0
